@@ -1,0 +1,1262 @@
+<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>iPad Inventory & Sales Tracker</title>
+  <meta name="theme-color" content="#000000">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" sizes="192x192" href="icons/ud-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/ud-180.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="icons/ud-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="icons/ud-512.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { box-sizing: border-box; font-family: 'Space Grotesk', sans-serif; }
+    html, body { height: 100%; width: 100%; }
+    #app-container { height: 100%; width: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    .tab-btn.active { border-bottom: 3px solid currentColor; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    .spinner { border: 2px solid transparent; border-top-color: currentColor; border-radius: 50%; width: 16px; height: 16px; animation: spin 0.8s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .low-stock { background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(239, 68, 68, 0.05) 100%); border-color: rgba(239, 68, 68, 0.3); }
+    .critical-stock { background: linear-gradient(135deg, rgba(220, 38, 38, 0.15) 0%, rgba(220, 38, 38, 0.08) 100%); border-color: rgba(220, 38, 38, 0.4); }
+    .sale-row { border-left: 3px solid currentColor; }
+    @media print { .no-print { display: none !important; } body { background: white; color: black; } }
+    .btn-large { padding: 16px 20px; font-size: 16px; }
+    .input-lg { padding: 14px 16px; font-size: 16px; }
+  </style>
+  <style>@view-transition { navigation: auto; }</style>
+
+  <!-- LocalStorage SDK shims (iPad-only persistence) -->
+  <script>
+    (function () {
+      // Element (config) shim
+      window.elementSdk = {
+        config: {},
+        _onConfigChange: null,
+        async init({ defaultConfig, onConfigChange }) {
+          try {
+            const saved = JSON.parse(localStorage.getItem('app-config') || '{}');
+            this.config = { ...defaultConfig, ...saved };
+          } catch {
+            this.config = { ...defaultConfig };
+          }
+          this._onConfigChange = onConfigChange;
+          if (typeof onConfigChange === 'function') { await onConfigChange(this.config); }
+          return { isOk: true };
+        },
+        async setConfig(partial) {
+          this.config = { ...this.config, ...partial };
+          localStorage.setItem('app-config', JSON.stringify(this.config));
+          if (typeof this._onConfigChange === 'function') { await this._onConfigChange(this.config); }
+          return { isOk: true };
+        }
+      };
+
+      // Data shim (products + sales)
+      window.dataSdk = {
+        _key: 'app-data',
+        _data: [],
+        _handler: null,
+        _save() {
+          localStorage.setItem(this._key, JSON.stringify(this._data));
+          if (this._handler && typeof this._handler.onDataChanged === 'function') {
+            this._handler.onDataChanged(this._data);
+          }
+        },
+        async init(handler) {
+          this._handler = handler;
+          try {
+            const raw = localStorage.getItem(this._key);
+            this._data = raw ? JSON.parse(raw) : [];
+          } catch { this._data = []; }
+          if (handler && typeof handler.onDataChanged === 'function') {
+            handler.onDataChanged(this._data);
+          }
+          return { isOk: true };
+        },
+        async create(item) {
+          const id = 'id-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
+          const rec = { ...item, __backendId: id };
+          this._data.push(rec);
+          this._save();
+          return { isOk: true, value: rec };
+        },
+        async update(item) {
+          const i = this._data.findIndex(r => r.__backendId === item.__backendId);
+          if (i === -1) return { isOk: false, error: 'not found' };
+          this._data[i] = { ...item };
+          this._save();
+          return { isOk: true, value: this._data[i] };
+        },
+        async delete(item) {
+          const i = this._data.findIndex(r => r.__backendId === item.__backendId);
+          if (i === -1) return { isOk: false, error: 'not found' };
+          this._data.splice(i, 1);
+          this._save();
+          return { isOk: true };
+        },
+        async importReplace(records) {
+          // Replace everything with provided records array
+          if (!Array.isArray(records)) return { isOk: false, error: 'invalid records' };
+          this._data = records;
+          this._save();
+          return { isOk: true };
+        }
+      };
+    })();
+  </script>
+</head>
+<body class="h-full bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-slate-100">
+  <div id="app-container" class="h-full w-full">
+    <!-- Mobile Header -->
+    <header class="sticky top-0 z-40 bg-slate-950/95 backdrop-blur border-b border-slate-700 no-print">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h1 class="text-2xl sm:text-3xl font-bold text-white">My Store</h1>
+            <p class="text-xs sm:text-sm text-slate-400 mt-1">Stock Management</p>
+          </div>
+          <div class="text-right">
+            <div id="current-date" class="text-sm text-slate-400"></div>
+            <button onclick="printCurrentView()" class="text-slate-400 hover:text-slate-200 text-lg mt-2">🖨️</button>
+          </div>
+        </div>
+        <!-- Quick Stats Row -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div class="bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
+            <p class="text-xs text-slate-400">Products</p>
+            <p id="stat-products" class="text-lg sm:text-xl font-bold text-slate-100">0</p>
+          </div>
+          <div class="bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
+            <p class="text-xs text-slate-400">Total Stock</p>
+            <p id="stat-stock" class="text-lg sm:text-xl font-bold text-slate-100">0</p>
+          </div>
+          <div class="bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
+            <p class="text-xs text-slate-400">Today Sales</p>
+            <p id="stat-today" class="text-lg sm:text-xl font-bold text-amber-400">0</p>
+          </div>
+          <div class="bg-slate-800/50 rounded-lg p-3 border border-slate-700/50">
+            <p class="text-xs text-slate-400">Today Revenue</p>
+            <p id="stat-today-revenue" class="text-lg sm:text-xl font-bold text-emerald-400">$0</p>
+          </div>
+        </div>
+      </div>
+      <!-- Tab Navigation -->
+      <div class="border-t border-slate-700 overflow-x-auto">
+        <div class="flex gap-1 px-4 py-3 min-w-full">
+          <button class="tab-btn active px-4 py-2 text-sm font-medium text-emerald-400 whitespace-nowrap hover:text-emerald-300" onclick="switchTab('dashboard')">📊 Dashboard</button>
+          <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-400 whitespace-nowrap hover:text-slate-200" onclick="switchTab('inventory')">📦 Inventory</button>
+          <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-400 whitespace-nowrap hover:text-slate-200" onclick="switchTab('sales')">💰 Sales</button>
+          <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-400 whitespace-nowrap hover:text-slate-200" onclick="switchTab('reports')">📋 Reports</button>
+          <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-400 whitespace-nowrap hover:text-slate-200" onclick="switchTab('settings')">⚙️ Settings</button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto p-4 pb-32">
+      <!-- Dashboard Tab -->
+      <section id="tab-dashboard" class="fade-in">
+        <!-- Key Alerts -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
+          <!-- Low Stock Alert -->
+          <div id="low-stock-card" class="bg-gradient-to-br from-red-900/20 to-red-900/5 border border-red-500/30 rounded-2xl p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-lg font-semibold text-red-400">⚠️ Low Stock Alert</h3>
+              <span id="low-stock-count" class="bg-red-500/20 text-red-300 px-3 py-1 rounded-full text-sm font-medium">0</span>
+            </div>
+            <div id="low-stock-list" class="space-y-2 max-h-40 overflow-y-auto">
+              <p class="text-sm text-slate-400">No low stock items</p>
+            </div>
+            <button onclick="switchTab('reports')" class="mt-4 w-full bg-red-500/20 hover:bg-red-500/30 text-red-300 py-2 rounded-lg text-sm font-medium transition-colors">View All Alerts →</button>
+          </div>
+          <!-- Sales Today -->
+          <div class="bg-gradient-to-br from-amber-900/20 to-amber-900/5 border border-amber-500/30 rounded-2xl p-5">
+            <h3 class="text-lg font-semibold text-amber-400 mb-4">📅 Today's Sales</h3>
+            <div class="space-y-2 max-h-40 overflow-y-auto">
+              <div id="today-sales-list">
+                <p class="text-sm text-slate-400">No sales yet today</p>
+              </div>
+            </div>
+            <button onclick="switchTab('sales')" class="mt-4 w-full bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 py-2 rounded-lg text-sm font-medium transition-colors">Record Sale →</button>
+          </div>
+          <!-- Quick Actions -->
+          <div class="bg-gradient-to-br from-emerald-900/20 to-emerald-900/5 border border-emerald-500/30 rounded-2xl p-5">
+            <h3 class="text-lg font-semibold text-emerald-400 mb-4">⚡ Quick Actions</h3>
+            <div class="space-y-2">
+              <button onclick="switchTab('sales'); setTimeout(() => showRecordSaleForm(), 100)" class="btn-large w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors">Record Sale</button>
+              <button onclick="switchTab('inventory'); setTimeout(() => showAddProductForm(), 100)" class="btn-large w-full bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors">Add Product</button>
+            </div>
+          </div>
+        </div>
+        <!-- Inventory Overview -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-6">
+          <h3 class="text-lg font-semibold mb-4 text-slate-200">📦 Inventory Overview</h3>
+          <div id="dashboard-inventory" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 max-h-80 overflow-y-auto">
+            <p class="text-slate-400 text-sm col-span-full">Loading products...</p>
+          </div>
+        </div>
+        <!-- Recent Sales -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5">
+          <h3 class="text-lg font-semibold mb-4 text-slate-200">💰 Recent Sales</h3>
+          <div id="dashboard-sales" class="space-y-2 max-h-80 overflow-y-auto">
+            <p class="text-slate-400 text-sm">No sales recorded yet</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Inventory Tab -->
+      <section id="tab-inventory" class="hidden fade-in">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+          <h2 class="text-2xl font-bold text-slate-200">Product Inventory</h2>
+          <div class="flex gap-2">
+            <button onclick="showCategoryManager()" class="btn-large bg-slate-600 hover:bg-slate-500 text-white rounded-lg font-medium transition-colors flex items-center gap-2"> ⚙️ Categories </button>
+            <button onclick="showAddProductForm()" class="btn-large bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors flex items-center gap-2"> <span>+</span> Add Product </button>
+          </div>
+        </div>
+
+        <!-- Category Manager -->
+        <div id="category-manager" class="hidden bg-slate-800 rounded-2xl p-6 mb-6 border border-slate-700 fade-in">
+          <h3 class="text-xl font-semibold mb-6 text-slate-200">Manage Categories</h3>
+          <div class="space-y-4">
+            <!-- Add Category Form -->
+            <div class="flex gap-2">
+              <input type="text" id="new-category-input" class="input-lg flex-1 bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="Enter new category name">
+              <button onclick="handleAddCategory" class="hidden"></button>
+              <button onclick="handleAddCategory()" class="btn-large bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors">Add</button>
+              <button onclick="hideCategoryManager()" class="btn-large bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors">Done</button>
+            </div>
+            <!-- Categories List -->
+            <div id="categories-list" class="space-y-2 max-h-64 overflow-y-auto">
+              <p class="text-slate-400 text-sm">Loading categories...</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Add Product Form -->
+        <div id="add-product-form" class="hidden bg-slate-800 rounded-2xl p-6 mb-6 border border-slate-700 fade-in">
+          <h3 class="text-xl font-semibold mb-6 text-slate-200">Add New Product</h3>
+          <form onsubmit="handleAddProduct(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label for="product-name" class="block text-sm text-slate-400 mb-2 font-medium">Product Name *</label>
+              <input type="text" id="product-name" required class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="Enter product name">
+            </div>
+            <div>
+              <label for="product-category" class="block text-sm text-slate-400 mb-2 font-medium">Category</label>
+              <select id="product-category" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500"> </select>
+            </div>
+            <div>
+              <label for="product-quantity" class="block text-sm text-slate-400 mb-2 font-medium">Quantity *</label>
+              <input type="number" id="product-quantity" required min="0" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="0">
+            </div>
+            <div>
+              <label for="product-price" class="block text-sm text-slate-400 mb-2 font-medium">Price ($) *</label>
+              <input type="number" id="product-price" required min="0" step="0.01" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="0.00">
+            </div>
+            <div>
+              <label for="product-threshold" class="block text-sm text-slate-400 mb-2 font-medium">Low Stock Alert (qty)</label>
+              <input type="number" id="product-threshold" min="0" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="5">
+            </div>
+            <div class="sm:col-span-2 flex gap-3 justify-end mt-4">
+              <button type="button" onclick="hideAddProductForm()" class="px-6 py-3 rounded-lg text-slate-400 hover:text-slate-200 font-medium transition-colors">Cancel</button>
+              <button type="submit" id="add-product-btn" class="btn-large bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors">Add Product</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Edit Product Form -->
+        <div id="edit-product-form" class="hidden bg-slate-800 rounded-2xl p-6 mb-6 border border-slate-700 fade-in">
+          <h3 class="text-xl font-semibold mb-6 text-slate-200">Edit Product</h3>
+          <form onsubmit="handleEditProduct(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-4"> <input type="hidden" id="edit-product-id">
+            <div>
+              <label class="block text-sm text-slate-400 mb-2 font-medium">Product Name</label>
+              <input type="text" id="edit-product-name" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-2 font-medium">Category</label>
+              <select id="edit-product-category" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500"> </select>
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-2 font-medium">Quantity</label>
+              <input type="number" id="edit-product-quantity" min="0" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-2 font-medium">Price ($)</label>
+              <input type="number" id="edit-product-price" min="0" step="0.01" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500">
+            </div>
+            <div>
+              <label class="block text-sm text-slate-400 mb-2 font-medium">Low Stock Alert (qty)</label>
+              <input type="number" id="edit-product-threshold" min="0" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500">
+            </div>
+            <div class="sm:col-span-2 flex gap-3 justify-end mt-4">
+              <button type="button" onclick="hideEditProductForm()" class="px-4 py-2 rounded-lg text-slate-400 hover:text-slate-200 transition-colors font-medium">Cancel</button>
+              <button type="submit" id="edit-product-btn" class="btn-large bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors">Save Changes</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Products List -->
+        <div id="products-list" class="space-y-3">
+          <div class="text-center py-16 text-slate-500">
+            <p class="text-5xl mb-3">📦</p>
+            <p>No products yet. Add your first product!</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sales Tab -->
+      <section id="tab-sales" class="hidden fade-in">
+        <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+          <h2 class="text-2xl font-bold text-slate-200">Record Sales</h2>
+          <button onclick="showRecordSaleForm()" class="btn-large bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors flex items-center gap-2"> <span>+</span> Record Sale </button>
+        </div>
+
+        <!-- Record Sale Form -->
+        <div id="record-sale-form" class="hidden bg-slate-800 rounded-2xl p-6 mb-6 border border-slate-700 fade-in">
+          <h3 class="text-xl font-semibold mb-6 text-slate-200">Record New Sale</h3>
+          <form onsubmit="handleRecordSale(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label for="sale-product" class="block text-sm text-slate-400 mb-2 font-medium">Product *</label>
+              <select id="sale-product" required class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500"> <option value="">Select a product</option> </select>
+            </div>
+            <div>
+              <label for="sale-quantity" class="block text-sm text-slate-400 mb-2 font-medium">Quantity *</label>
+              <input type="number" id="sale-quantity" required min="1" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500" placeholder="1">
+            </div>
+            <div class="sm:col-span-2">
+              <p id="sale-info" class="text-sm text-slate-400 bg-slate-700/50 p-3 rounded-lg"></p>
+            </div>
+            <div class="sm:col-span-2 flex gap-3 justify-end mt-4">
+              <button type="button" onclick="hideRecordSaleForm()" class="px-6 py-3 rounded-lg text-slate-400 hover:text-slate-200 font-medium transition-colors">Cancel</button>
+              <button type="submit" id="record-sale-btn" class="btn-large bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors">Record Sale</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Sales History with Filter -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-6">
+          <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+            <h3 class="text-lg font-semibold text-slate-200">Sales History</h3>
+            <input type="date" id="sales-filter-date" class="input-lg bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500" onchange="updateSalesFilter()">
+          </div>
+          <div id="sales-list" class="space-y-2 max-h-96 overflow-y-auto">
+            <p class="text-slate-400 text-sm">No sales recorded yet</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Reports Tab -->
+      <section id="tab-reports" class="hidden fade-in">
+        <h2 class="text-2xl font-bold text-slate-200 mb-6">Reports & Analytics</h2>
+        <!-- Report Buttons -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8">
+          <button onclick="showMonthlyReport()" class="btn-large bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"> 📊 Monthly Sales Report </button>
+          <button onclick="showInventoryReport()" class="btn-large bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"> 📋 Inventory Report </button>
+          <button onclick="showLowStockReport()" class="btn-large bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"> ⚠️ Low Stock Alert </button>
+          <button onclick="showPrintableList()" class="btn-large bg-gradient-to-r from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700 text-white rounded-2xl font-semibold transition-all flex items-center justify-center gap-2"> 🖨️ Printable List </button>
+        </div>
+        <!-- Monthly Report -->
+        <div id="monthly-report" class="hidden bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6 fade-in">
+          <div class="flex justify-between items-center mb-6">
+            <h3 class="text-xl font-semibold text-slate-200">Monthly Sales Report</h3>
+            <div class="flex gap-2">
+              <input type="month" id="report-month" class="input-lg bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-blue-500" onchange="updateMonthlyReport()">
+              <button onclick="printCurrentView()" class="btn-large bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors">🖨️ Print</button>
+            </div>
+          </div>
+          <div id="monthly-report-content" class="space-y-4">
+            <p class="text-slate-400">Loading report...</p>
+          </div>
+        </div>
+        <!-- Inventory Report -->
+        <div id="inventory-report" class="hidden bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6 fade-in">
+          <div class="flex justify-between items-center mb-6">
+            <h3 class="text-xl font-semibold text-slate-200">Complete Inventory Report</h3>
+            <button onclick="printCurrentView()" class="btn-large bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors">🖨️ Print</button>
+          </div>
+          <div id="inventory-report-content" class="space-y-3 max-h-96 overflow-y-auto">
+            <p class="text-slate-400">Loading report...</p>
+          </div>
+        </div>
+        <!-- Low Stock Report -->
+        <div id="low-stock-report" class="hidden bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6 fade-in">
+          <div class="flex justify-between items-center mb-6">
+            <h3 class="text-xl font-semibold text-red-400">Low Stock Items</h3>
+            <button onclick="printCurrentView()" class="btn-large bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors">🖨️ Print</button>
+          </div>
+          <div id="low-stock-report-content" class="space-y-3">
+            <p class="text-slate-400">No low stock items</p>
+          </div>
+        </div>
+        <!-- Printable List -->
+        <div id="printable-list" class="hidden bg-white text-gray-800 rounded-2xl p-8 fade-in">
+          <div class="flex justify-between items-center mb-6">
+            <div>
+              <h3 class="text-2xl font-bold">Store Inventory List</h3>
+              <p id="printable-date" class="text-sm text-gray-600"></p>
+            </div>
+            <button onclick="printCurrentView()" class="no-print btn-large bg-gray-800 hover:bg-gray-900 text-white rounded-lg font-medium transition-colors">🖨️ Print</button>
+          </div>
+          <div id="printable-list-content" class="space-y-1">
+            <p class="text-gray-400">Loading...</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings Tab -->
+      <section id="tab-settings" class="hidden fade-in">
+        <h2 class="text-2xl font-bold text-slate-200 mb-6">Store Settings</h2>
+        <!-- Store Information -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6">
+          <h3 class="text-xl font-semibold text-slate-200 mb-6">Store Information</h3>
+          <form onsubmit="handleUpdateSettings(event)" class="space-y-6">
+            <div>
+              <label for="settings-store-name" class="block text-sm font-medium text-slate-300 mb-2">Store Name</label>
+              <input type="text" id="settings-store-name" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="Enter store name">
+            </div>
+            <div>
+              <label for="settings-store-phone" class="block text-sm font-medium text-slate-300 mb-2">Phone Number</label>
+              <input type="tel" id="settings-store-phone" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="(555) 000-0000">
+            </div>
+            <div>
+              <label for="settings-store-email" class="block text-sm font-medium text-slate-300 mb-2">Email Address</label>
+              <input type="email" id="settings-store-email" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500" placeholder="store@example.com">
+            </div>
+            <div>
+              <label for="settings-store-address" class="block text-sm font-medium text-slate-300 mb-2">Address</label>
+              <textarea id="settings-store-address" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-emerald-500 resize-none" rows="3" placeholder="Store address"></textarea>
+            </div>
+            <button type="submit" id="save-store-btn" class="btn-large w-full bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg font-medium transition-colors">Save Store Info</button>
+          </form>
+        </div>
+
+        <!-- Tax Settings -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6">
+          <h3 class="text-xl font-semibold text-slate-200 mb-6">Tax & Pricing</h3>
+          <form onsubmit="handleUpdateTax(event)" class="space-y-6">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              <div>
+                <label for="settings-tax-rate" class="block text-sm font-medium text-slate-300 mb-2">Sales Tax Rate (%)</label>
+                <input type="number" id="settings-tax-rate" min="0" max="100" step="0.01" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500" placeholder="8.5">
+              </div>
+              <div>
+                <label for="settings-tax-name" class="block text-sm font-medium text-slate-300 mb-2">Tax Name</label>
+                <input type="text" id="settings-tax-name" class="input-lg w-full bg-slate-700 border border-slate-600 rounded-lg text-slate-100 focus:outline-none focus:border-amber-500" placeholder="Sales Tax">
+              </div>
+            </div>
+            <div class="bg-slate-700/50 border border-slate-600 rounded-lg p-4">
+              <h4 class="text-sm font-medium text-slate-300 mb-3">Tax Preview</h4>
+              <div class="space-y-2 text-sm">
+                <div class="flex justify-between"><span class="text-slate-400">Subtotal:</span> <span class="text-slate-100">$100.00</span></div>
+                <div class="flex justify-between"><span class="text-slate-400" id="tax-preview-label">Sales Tax (8.5%):</span> <span class="text-amber-400" id="tax-preview-amount">$8.50</span></div>
+                <div class="flex justify-between border-t border-slate-600 pt-2 font-semibold"><span class="text-slate-300">Total:</span> <span class="text-emerald-400" id="tax-preview-total">$108.50</span></div>
+              </div>
+            </div>
+            <button type="submit" id="save-tax-btn" class="btn-large w-full bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors">Save Tax Settings</button>
+          </form>
+        </div>
+
+        <!-- Backup & Restore -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6 mb-6">
+          <h3 class="text-xl font-semibold text-slate-200 mb-4">Backup & Restore</h3>
+          <p class="text-sm text-slate-400 mb-4">Export your data to a JSON file or import it later. Import will <span class="font-semibold text-amber-400">replace</span> current data on this device.</p>
+          <div class="flex flex-col sm:flex-row gap-3">
+            <button onclick="exportJSON()" class="btn-large bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors">⬇️ Export JSON</button>
+            <label for="import-file" class="btn-large bg-slate-700 hover:bg-slate-600 text-slate-100 rounded-lg font-medium transition-colors text-center cursor-pointer">⬆️ Import JSON</label>
+            <input id="import-file" type="file" accept="application/json,.json" class="hidden" />
+          </div>
+          <p id="backup-status" class="text-xs text-slate-400 mt-3"></p>
+        </div>
+
+        <!-- Store Status -->
+        <div class="bg-gradient-to-br from-slate-700 to-slate-800 border border-slate-600 rounded-2xl p-6 mb-6">
+          <h3 class="text-xl font-semibold text-slate-200 mb-6">Store Status</h3>
+          <div class="space-y-4">
+            <div class="flex items-center justify-between p-4 bg-slate-800/50 rounded-lg border border-slate-600">
+              <div>
+                <p class="text-sm text-slate-400">Total Products</p>
+                <p class="text-2xl font-bold text-emerald-400" id="status-products">0</p>
+              </div>
+              <div class="text-4xl">📦</div>
+            </div>
+            <div class="flex items-center justify-between p-4 bg-slate-800/50 rounded-lg border border-slate-600">
+              <div>
+                <p class="text-sm text-slate-400">Total Inventory Value</p>
+                <p class="text-2xl font-bold text-emerald-400" id="status-inventory-value">$0.00</p>
+              </div>
+              <div class="text-4xl">💰</div>
+            </div>
+            <div class="flex items-center justify-between p-4 bg-slate-800/50 rounded-lg border border-slate-600">
+              <div>
+                <p class="text-sm text-slate-400">Total Sales Records</p>
+                <p class="text-2xl font-bold text-blue-400" id="status-total-sales">0</p>
+              </div>
+              <div class="text-4xl">📊</div>
+            </div>
+            <div class="flex items-center justify-between p-4 bg-slate-800/50 rounded-lg border border-slate-600">
+              <div>
+                <p class="text-sm text-slate-400">Low Stock Items</p>
+                <p class="text-2xl font-bold text-red-400" id="status-low-stock">0</p>
+              </div>
+              <div class="text-4xl">⚠️</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Information -->
+        <div class="bg-slate-800 border border-slate-700 rounded-2xl p-6">
+          <h3 class="text-xl font-semibold text-slate-200 mb-4">About This App</h3>
+          <div class="space-y-3 text-sm text-slate-400">
+            <p>📦 Inventory & Sales Tracker helps you manage your store's stock and track daily sales with real-time data.</p>
+            <p>💾 All your data is automatically saved on this device.</p>
+            <p>📊 View detailed reports, monitor low stock alerts, and analyze sales trends.</p>
+            <p class="pt-3 border-t border-slate-600 text-slate-500">Last updated: <span id="last-updated">Just now</span></p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Toast Container -->
+    <div id="toast-container" class="fixed bottom-24 right-4 z-50 space-y-2"></div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="delete-modal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 no-print">
+      <div class="bg-slate-800 rounded-2xl p-6 max-w-sm mx-4 border border-slate-700">
+        <h3 class="text-lg font-semibold text-slate-200 mb-2">Confirm Delete</h3>
+        <p id="delete-modal-text" class="text-slate-400 mb-6">Are you sure you want to delete this item?</p>
+        <div class="flex gap-3 justify-end">
+          <button onclick="hideDeleteModal()" class="px-6 py-3 rounded-lg text-slate-400 hover:text-slate-200 font-medium transition-colors">Cancel</button>
+          <button id="delete-confirm-btn" onclick="confirmDelete()" class="btn-large bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App Script -->
+  <script>
+    let allData = [];
+    let currentTab = 'dashboard';
+    let pendingDelete = null;
+    let recordCount = 0;
+    let categories = ['General', 'Electronics', 'Clothing', 'Food', 'Other'];
+
+    const defaultConfig = {
+      store_name: 'My Store',
+      store_phone: '(555) 123-4567',
+      sales_tax_rate: '8.5',
+      categories_list: 'General, Electronics, Clothing, Food, Other'
+    };
+
+    const dataHandler = {
+      onDataChanged(data) {
+        allData = data;
+        recordCount = data.length;
+        renderAll();
+      }
+    };
+
+    // Initialize App
+    async function initApp() {
+      const today = new Date().toISOString().split('T')[0];
+      document.getElementById('sales-filter-date').value = today;
+      document.getElementById('report-month').value = new Date().toISOString().substring(0, 7);
+      document.getElementById('printable-date').textContent = new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+      document.getElementById('current-date').textContent = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+      if (window.elementSdk) {
+        await window.elementSdk.init({
+          defaultConfig,
+          onConfigChange: async (config) => {
+            document.querySelector('h1').textContent = config.store_name || defaultConfig.store_name;
+            if (config.categories_list) {
+              categories = config.categories_list.split(',').map(c => c.trim()).filter(c => c);
+            }
+            updateCategorySelects();
+          }
+        });
+      }
+
+      if (window.dataSdk) {
+        const result = await window.dataSdk.init(dataHandler);
+        if (!result.isOk) { showToast('Failed to connect to data storage', 'error'); }
+      }
+
+      // Hook up import file input
+      const importInput = document.getElementById('import-file');
+      if (importInput) {
+        importInput.addEventListener('change', async (e) => {
+          const file = e.target.files && e.target.files[0];
+          if (!file) return;
+          try {
+            const text = await file.text();
+            const json = JSON.parse(text);
+            if (!json || json.schema !== 'ipad-inventory-local-v1') {
+              throw new Error('Invalid schema');
+            }
+            // Optional: basic structure validation
+            const cfg = json.config || {};
+            const recs = Array.isArray(json.records) ? json.records : [];
+            if (!Array.isArray(recs)) throw new Error('Invalid records');
+
+            // Apply config first
+            await window.elementSdk.setConfig({
+              store_name: cfg.store_name || defaultConfig.store_name,
+              store_phone: cfg.store_phone || defaultConfig.store_phone,
+              sales_tax_rate: cfg.sales_tax_rate || defaultConfig.sales_tax_rate,
+              categories_list: cfg.categories_list || defaultConfig.categories_list
+            });
+
+            // Replace data
+            const result = await window.dataSdk.importReplace(recs);
+            if (!result.isOk) throw new Error('Import failed');
+
+            document.getElementById('backup-status').textContent = `Imported ${recs.length} records from "${file.name}"`;
+            showToast('Import complete!', 'success');
+          } catch (err) {
+            console.error(err);
+            showToast('Import failed. Check the file.', 'error');
+          } finally {
+            e.target.value = '';
+          }
+        });
+      }
+    }
+
+    // Helpers
+    function getProducts() { return allData.filter(item => item.type === 'product'); }
+    function getSales() { return allData.filter(item => item.type === 'sale'); }
+    function getLowStockProducts() { return getProducts().filter(p => (p.quantity || 0) <= (p.low_stock_threshold || 5)); }
+    function getTodaySales() { const today = new Date().toISOString().split('T')[0]; return getSales().filter(s => s.sale_date.split('T')[0] === today); }
+    function calculateRevenueWithTax(revenue) { const taxRate = window.elementSdk ? (parseFloat(window.elementSdk.config.sales_tax_rate) || 0) / 100 : 0; return revenue * (1 + taxRate); }
+    function calculateTaxAmount(revenue) { const taxRate = window.elementSdk ? (parseFloat(window.elementSdk.config.sales_tax_rate) || 0) / 100 : 0; return revenue * taxRate; }
+
+    // JSON Backup
+    function exportJSON() {
+      const payload = {
+        schema: 'ipad-inventory-local-v1',
+        exportedAt: new Date().toISOString(),
+        config: (window.elementSdk && window.elementSdk.config) ? window.elementSdk.config : defaultConfig,
+        records: allData
+      };
+      const pretty = JSON.stringify(payload, null, 2);
+      const blob = new Blob([pretty], { type: 'application/json' });
+      const ts = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
+      const fname = `inventory-backup-${ts}.json`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+      const status = document.getElementById('backup-status');
+      if (status) status.textContent = `Exported ${getProducts().length} products, ${getSales().length} sales to ${fname}`;
+      showToast('Export complete!', 'success');
+    }
+
+    // Event-safe tab switcher
+    function switchTab(tab) {
+      currentTab = tab;
+      document.querySelectorAll('section[id^="tab-"]').forEach(s => s.classList.add('hidden'));
+      const toShow = document.getElementById(`tab-${tab}`);
+      if (toShow) toShow.classList.remove('hidden');
+      const labelByTab = { dashboard: 'Dashboard', inventory: 'Inventory', sales: 'Sales', reports: 'Reports', settings: 'Settings' };
+      const wanted = labelByTab[tab];
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        const isActive = b.textContent.includes(wanted);
+        b.classList.toggle('active', isActive);
+        b.classList.toggle('text-emerald-400', isActive);
+        b.classList.toggle('text-slate-400', !isActive);
+      });
+    }
+
+    function showAddProductForm() { document.getElementById('add-product-form').classList.remove('hidden'); setTimeout(() => document.getElementById('product-name').focus(), 100); }
+    function hideAddProductForm() { document.getElementById('add-product-form').classList.add('hidden'); document.getElementById('product-name').value = ''; document.getElementById('product-quantity').value = ''; document.getElementById('product-price').value = ''; document.getElementById('product-category').value = 'General'; document.getElementById('product-threshold').value = ''; }
+    function showCategoryManager() { document.getElementById('category-manager').classList.remove('hidden'); renderCategoryList(); }
+    function hideCategoryManager() { document.getElementById('category-manager').classList.add('hidden'); document.getElementById('new-category-input').value = ''; }
+
+    function handleAddCategory() {
+      const input = document.getElementById('new-category-input');
+      const name = input.value.trim();
+      if (!name) { showToast('Enter a category name', 'warning'); return; }
+      if (categories.includes(name)) { showToast('Category already exists', 'warning'); return; }
+      categories.push(name);
+      updateCategoryConfig();
+      input.value = '';
+      renderCategoryList();
+      updateCategorySelects();
+      showToast('Category added!', 'success');
+    }
+
+    function deleteCategory(categoryName) {
+      if (categories.length <= 1) { showToast('You must have at least one category', 'warning'); return; }
+      categories = categories.filter(c => c !== categoryName);
+      updateCategoryConfig();
+      renderCategoryList();
+      updateCategorySelects();
+      showToast('Category deleted!', 'success');
+    }
+
+    function updateCategoryConfig() {
+      if (window.elementSdk) { window.elementSdk.setConfig({ categories_list: categories.join(', ') }); }
+    }
+
+    function updateCategorySelects() {
+      const selects = document.querySelectorAll('select[id*="category"]');
+      selects.forEach(select => {
+        const currentValue = select.value;
+        select.innerHTML = categories.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+        if (categories.includes(currentValue)) { select.value = currentValue; } else { select.value = categories[0]; }
+      });
+    }
+
+    function renderCategoryList() {
+      const container = document.getElementById('categories-list');
+      if (categories.length === 0) { container.innerHTML = '<p class="text-slate-400 text-sm">No categories</p>'; return; }
+      container.innerHTML = categories.map(cat => `
+        <div class="flex items-center justify-between bg-slate-700/50 rounded-lg p-3 border border-slate-600">
+          <span class="text-slate-100">${cat}</span>
+          <button onclick="deleteCategory('${cat}')" class="text-slate-400 hover:text-red-400 transition-colors font-medium">🗑️</button>
+        </div>
+      `).join('');
+    }
+
+    function showEditProductForm(product) {
+      document.getElementById('edit-product-id').value = product.__backendId;
+      document.getElementById('edit-product-name').value = product.name;
+      document.getElementById('edit-product-category').value = product.category || 'General';
+      document.getElementById('edit-product-quantity').value = product.quantity;
+      document.getElementById('edit-product-price').value = product.price;
+      document.getElementById('edit-product-threshold').value = product.low_stock_threshold || '';
+      document.getElementById('edit-product-form').classList.remove('hidden');
+    }
+    function hideEditProductForm() { document.getElementById('edit-product-form').classList.add('hidden'); }
+
+    function showRecordSaleForm() {
+      if (getProducts().length === 0) { showToast('Add products first before recording sales', 'warning'); return; }
+      updateProductSelect();
+      document.getElementById('record-sale-form').classList.remove('hidden');
+    }
+    function hideRecordSaleForm() { document.getElementById('record-sale-form').classList.add('hidden'); document.getElementById('sale-product').value = ''; document.getElementById('sale-quantity').value = ''; document.getElementById('sale-info').textContent = ''; }
+
+    function updateProductSelect() {
+      const select = document.getElementById('sale-product');
+      const products = getProducts().filter(p => p.quantity > 0);
+      select.innerHTML = '<option value="">Select a product</option>';
+      products.forEach(product => {
+        const option = document.createElement('option');
+        option.value = product.__backendId;
+        option.textContent = `${product.name} (${product.quantity} available) - $${parseFloat(product.price).toFixed(2)}`;
+        select.appendChild(option);
+      });
+    }
+
+    document.getElementById('sale-product')?.addEventListener('change', function() {
+      const productId = this.value;
+      const product = getProducts().find(p => p.__backendId === productId);
+      const infoEl = document.getElementById('sale-info');
+      if (product) { infoEl.textContent = `Available: ${product.quantity} units at $${parseFloat(product.price).toFixed(2)} each`; }
+      else { infoEl.textContent = ''; }
+    });
+
+    // Add product
+    async function handleAddProduct(event) {
+      event.preventDefault();
+      if (recordCount >= 999) { showToast('Maximum limit of 999 records reached', 'error'); return; }
+      const btn = document.getElementById('add-product-btn');
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Adding...';
+      const product = {
+        type: 'product',
+        name: document.getElementById('product-name').value.trim(),
+        category: document.getElementById('product-category').value,
+        quantity: parseInt(document.getElementById('product-quantity').value),
+        price: parseFloat(document.getElementById('product-price').value),
+        low_stock_threshold: parseInt(document.getElementById('product-threshold').value) || 5,
+        created_at: new Date().toISOString()
+      };
+      const result = await window.dataSdk.create(product);
+      btn.disabled = false; btn.innerHTML = 'Add Product';
+      if (result.isOk) { hideAddProductForm(); showToast('Product added!', 'success'); } else { showToast('Failed to add product', 'error'); }
+    }
+
+    // Edit product
+    async function handleEditProduct(event) {
+      event.preventDefault();
+      const btn = document.getElementById('edit-product-btn');
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Saving...';
+      const productId = document.getElementById('edit-product-id').value;
+      const product = getProducts().find(p => p.__backendId === productId);
+      const updated = {
+        ...product,
+        name: document.getElementById('edit-product-name').value.trim(),
+        category: document.getElementById('edit-product-category').value,
+        quantity: parseInt(document.getElementById('edit-product-quantity').value),
+        price: parseFloat(document.getElementById('edit-product-price').value),
+        low_stock_threshold: parseInt(document.getElementById('edit-product-threshold').value) || 5
+      };
+      const result = await window.dataSdk.update(updated);
+      btn.disabled = false; btn.innerHTML = 'Save Changes';
+      if (result.isOk) { hideEditProductForm(); showToast('Product updated!', 'success'); } else { showToast('Failed to update product', 'error'); }
+    }
+
+    // Record sale
+    async function handleRecordSale(event) {
+      event.preventDefault();
+      if (recordCount >= 999) { showToast('Maximum limit reached', 'error'); return; }
+      const productId = document.getElementById('sale-product').value;
+      const quantity = parseInt(document.getElementById('sale-quantity').value);
+      const product = getProducts().find(p => p.__backendId === productId);
+      if (!product || quantity > product.quantity) { showToast('Invalid quantity', 'error'); return; }
+      const btn = document.getElementById('record-sale-btn');
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Recording...';
+      const sale = {
+        type: 'sale',
+        product_id: product.__backendId,
+        name: product.name,
+        category: product.category,
+        sold_quantity: quantity,
+        price: product.price,
+        revenue: quantity * product.price,
+        sale_date: new Date().toISOString()
+      };
+      const saleResult = await window.dataSdk.create(sale);
+      if (saleResult.isOk) {
+        const updatedProduct = { ...product, quantity: product.quantity - quantity };
+        await window.dataSdk.update(updatedProduct);
+        btn.disabled = false; btn.innerHTML = 'Record Sale'; hideRecordSaleForm(); showToast('Sale recorded!', 'success');
+      } else {
+        btn.disabled = false; btn.innerHTML = 'Record Sale'; showToast('Failed to record sale', 'error');
+      }
+    }
+
+    // Delete modal
+    function showDeleteModal(item, type) {
+      pendingDelete = { item, type };
+      const text = type === 'product' ? `Delete "${item.name}"?` : `Delete this sale?`;
+      document.getElementById('delete-modal-text').textContent = text;
+      document.getElementById('delete-modal').classList.remove('hidden');
+    }
+    function hideDeleteModal() { document.getElementById('delete-modal').classList.add('hidden'); pendingDelete = null; }
+    async function confirmDelete() {
+      if (!pendingDelete) return;
+      const btn = document.getElementById('delete-confirm-btn');
+      btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
+      const result = await window.dataSdk.delete(pendingDelete.item);
+      btn.disabled = false; btn.textContent = 'Delete';
+      if (result.isOk) { hideDeleteModal(); showToast('Deleted!', 'success'); } else { showToast('Failed to delete', 'error'); }
+    }
+
+    // Toasts
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      const colors = { success: 'bg-emerald-500', error: 'bg-red-500', warning: 'bg-amber-500', info: 'bg-blue-500' };
+      toast.className = `${colors[type]} text-white px-4 py-3 rounded-lg shadow-lg fade-in`;
+      toast.textContent = message;
+      container.appendChild(toast);
+      setTimeout(() => toast.remove(), 2500);
+    }
+
+    // Rendering
+    function renderAll() { renderStats(); renderDashboard(); renderProducts(); renderSales(); updateStoreStatus(); }
+
+    function renderStats() {
+      const products = getProducts();
+      const today = getTodaySales();
+      const totalProducts = products.length;
+      const totalStock = products.reduce((sum, p) => sum + (p.quantity || 0), 0);
+      const todaySalesCount = today.reduce((sum, s) => sum + (s.sold_quantity || 0), 0);
+      const todayRevenue = today.reduce((sum, s) => sum + (s.revenue || 0), 0);
+      const todayRevenueWithTax = calculateRevenueWithTax(todayRevenue);
+      document.getElementById('stat-products').textContent = totalProducts;
+      document.getElementById('stat-stock').textContent = totalStock;
+      document.getElementById('stat-today').textContent = todaySalesCount;
+      document.getElementById('stat-today-revenue').textContent = `$${todayRevenueWithTax.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+
+    function renderDashboard() {
+      const lowStock = getLowStockProducts();
+      const today = getTodaySales();
+      const products = getProducts();
+
+      const lowStockList = document.getElementById('low-stock-list');
+      document.getElementById('low-stock-count').textContent = lowStock.length;
+      lowStockList.innerHTML = (lowStock.length === 0)
+        ? '<p class="text-sm text-slate-400">All items stocked well ✓</p>'
+        : lowStock.map(p => `
+          <div class="text-sm text-slate-300 p-2 bg-slate-700/50 rounded">
+            <span class="font-medium">${p.name}</span> - ${p.quantity} units
+          </div>`).join('');
+
+      const todayList = document.getElementById('today-sales-list');
+      if (today.length === 0) {
+        todayList.innerHTML = '<p class="text-sm text-slate-400">No sales yet</p>';
+      } else {
+        const totalRevenue = today.reduce((sum, s) => sum + s.revenue, 0);
+        const taxAmount = calculateTaxAmount(totalRevenue);
+        const revenueWithTax = calculateRevenueWithTax(totalRevenue);
+        todayList.innerHTML = `
+          <p class="text-sm text-slate-300 mb-2"><span class="font-semibold text-amber-400">${today.length} sales</span> today</p>
+          <p class="text-sm text-slate-400">Subtotal: <span class="text-slate-100 font-semibold">$${totalRevenue.toFixed(2)}</span></p>
+          <p class="text-sm text-slate-400">Tax: <span class="text-slate-100 font-semibold">$${taxAmount.toFixed(2)}</span></p>
+          <p class="text-sm text-amber-400 font-semibold border-t border-slate-600 mt-2 pt-2">Total: $${revenueWithTax.toFixed(2)}</p>`;
+      }
+
+      const invContainer = document.getElementById('dashboard-inventory');
+      invContainer.innerHTML = (products.length === 0)
+        ? '<p class="text-slate-400 text-sm col-span-full">No products yet</p>'
+        : products.slice(0, 6).map(p => {
+            const isLow = p.quantity <= (p.low_stock_threshold || 5);
+            return `
+              <div class="bg-slate-700/50 rounded-lg p-3 ${isLow ? 'border border-red-500/30' : 'border border-slate-600'}">
+                <div class="text-sm font-medium text-slate-200">${p.name}</div>
+                <div class="text-xs text-slate-400 mt-1">Qty: <span class="text-slate-100 font-semibold">${p.quantity}</span></div>
+                <div class="text-xs text-slate-400">$${p.price.toFixed(2)}</div>
+                ${isLow ? '<div class="text-xs text-red-400 mt-1">⚠️ Low Stock</div>' : ''}
+              </div>`;
+          }).join('');
+
+      const salesContainer = document.getElementById('dashboard-sales');
+      salesContainer.innerHTML = (today.length === 0)
+        ? '<p class="text-slate-400 text-sm">No sales yet</p>'
+        : today.slice(0, 5).map(s => `
+            <div class="bg-slate-700/50 rounded-lg p-3 border border-amber-500/20 sale-row border-l-amber-500">
+              <div class="flex justify-between items-start">
+                <div class="text-sm font-medium text-slate-200">${s.name}</div>
+                <div class="text-sm font-semibold text-amber-400">$${s.revenue.toFixed(2)}</div>
+              </div>
+              <div class="text-xs text-slate-400 mt-1">${s.sold_quantity} units × $${s.price.toFixed(2)}</div>
+            </div>`).join('');
+    }
+
+    function renderProducts() {
+      const container = document.getElementById('products-list');
+      const products = getProducts();
+      if (products.length === 0) {
+        container.innerHTML = `
+          <div class="text-center py-16 text-slate-500">
+            <p class="text-5xl mb-3">📦</p>
+            <p>No products. Add your first!</p>
+          </div>`;
+        return;
+      }
+      container.innerHTML = products.map(product => {
+        const threshold = product.low_stock_threshold || 5;
+        const isCritical = (product.quantity || 0) <= 0;
+        const isLow = !isCritical && (product.quantity || 0) <= threshold;
+        const stockBadge = isCritical ? 'border-red-500/20 text-red-400 critical-stock' : (isLow ? 'border-amber-500/20 text-amber-400 low-stock' : 'border-emerald-500/20 text-emerald-400');
+        const stockText = isCritical ? 'Out of Stock' : (isLow ? 'Low Stock' : 'In Stock');
+        return `
+          <div class="bg-slate-800 rounded-xl p-5 border ${isCritical ? 'critical-stock' : isLow ? 'low-stock' : 'border-slate-700'} fade-in">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div class="flex-1">
+                <div class="flex items-center gap-2 mb-2">
+                  <h3 class="font-semibold text-lg text-slate-100">${product.name}</h3>
+                  <span class="text-xs font-medium ${stockBadge}">${stockText}</span>
+                </div>
+                <p class="text-sm text-slate-400">Category: ${product.category || 'General'}</p>
+              </div>
+              <div class="grid grid-cols-3 gap-4 sm:gap-6 text-center">
+                <div>
+                  <p class="text-xs text-slate-400">Qty</p>
+                  <p class="text-2xl font-bold text-slate-100">${product.quantity}</p>
+                </div>
+                <div>
+                  <p class="text-xs text-slate-400">Price</p>
+                  <p class="text-lg font-semibold text-slate-100">$${parseFloat(product.price).toFixed(2)}</p>
+                </div>
+                <div>
+                  <p class="text-xs text-slate-400">Value</p>
+                  <p class="text-lg font-semibold text-emerald-400">$${(product.quantity * product.price).toFixed(2)}</p>
+                </div>
+              </div>
+              <div class="flex gap-2 sm:ml-4">
+                <button onclick="showEditProductForm(getProducts().find(p => p.__backendId === '${product.__backendId}'))" class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium transition-colors">✏️ Edit</button>
+                <button onclick="showDeleteModal(getProducts().find(p => p.__backendId === '${product.__backendId}'), 'product')" class="px-4 py-2 rounded-lg text-slate-400 hover:text-red-400 transition-colors font-medium">🗑️ Delete</button>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function renderSales() {
+      const container = document.getElementById('sales-list');
+      const filterDate = document.getElementById('sales-filter-date').value;
+      const sales = getSales()
+        .filter(s => s.sale_date.split('T')[0] === filterDate)
+        .sort((a, b) => new Date(b.sale_date) - new Date(a.sale_date));
+
+      if (sales.length === 0) { container.innerHTML = '<p class="text-slate-400 text-sm">No sales on this date</p>'; return; }
+
+      container.innerHTML = sales.map(sale => {
+        const date = new Date(sale.sale_date);
+        const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        return `
+          <div class="bg-slate-800 rounded-lg p-4 border border-amber-500/20 sale-row border-l-amber-500 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div class="flex-1">
+              <h3 class="font-semibold text-slate-100">${sale.name}</h3>
+              <p class="text-xs text-slate-400">Category: ${sale.category} • ${timeStr}</p>
+            </div>
+            <div class="flex items-center gap-6 text-center">
+              <div>
+                <p class="text-xs text-slate-400">Qty</p>
+                <p class="font-semibold text-slate-100">${sale.sold_quantity}</p>
+              </div>
+              <div>
+                <p class="text-xs text-slate-400">Unit Price</p>
+                <p class="font-semibold text-slate-100">$${parseFloat(sale.price).toFixed(2)}</p>
+              </div>
+              <div>
+                <p class="text-xs text-slate-400">Revenue</p>
+                <p class="font-semibold text-amber-400">$${parseFloat(sale.revenue).toFixed(2)}</p>
+              </div>
+            </div>
+            <button onclick="showDeleteModal(getSales().find(s => s.__backendId === '${sale.__backendId}'), 'sale')" class="px-4 py-2 rounded-lg text-slate-400 hover:text-red-400 transition-colors font-medium">🗑️</button>
+          </div>`;
+      }).join('');
+    }
+
+    function updateSalesFilter() { renderSales(); }
+
+    // Reports
+    function showMonthlyReport() {
+      document.querySelectorAll('[id$="-report"]').forEach(el => el.classList.add('hidden'));
+      document.getElementById('monthly-report').classList.remove('hidden');
+      updateMonthlyReport();
+    }
+
+    function updateMonthlyReport() {
+      const monthStr = document.getElementById('report-month').value;
+      const sales = getSales().filter(s => s.sale_date.startsWith(monthStr));
+      const content = document.getElementById('monthly-report-content');
+      if (sales.length === 0) { content.innerHTML = '<p class="text-slate-400">No sales in this month</p>'; return; }
+      const totalRevenue = sales.reduce((sum, s) => sum + s.revenue, 0);
+      const totalQty = sales.reduce((sum, s) => sum + s.sold_quantity, 0);
+      const taxAmount = calculateTaxAmount(totalRevenue);
+      const revenueWithTax = calculateRevenueWithTax(totalRevenue);
+      content.innerHTML = `
+        <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+          <div class="bg-slate-700/50 rounded-lg p-4">
+            <p class="text-sm text-slate-400">Total Sales</p>
+            <p class="text-2xl font-bold text-blue-400">${sales.length}</p>
+          </div>
+          <div class="bg-slate-700/50 rounded-lg p-4">
+            <p class="text-sm text-slate-400">Units Sold</p>
+            <p class="text-2xl font-bold text-slate-100">${totalQty}</p>
+          </div>
+          <div class="bg-slate-700/50 rounded-lg p-4">
+            <p class="text-sm text-slate-400">Subtotal</p>
+            <p class="text-2xl font-bold text-slate-100">$${totalRevenue.toFixed(2)}</p>
+          </div>
+          <div class="bg-slate-700/50 rounded-lg p-4 border border-blue-500/30">
+            <p class="text-sm text-slate-400">Total (with tax)</p>
+            <p class="text-2xl font-bold text-blue-400">$${revenueWithTax.toFixed(2)}</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-4 mb-6 sm:w-1/3">
+          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600">
+            <p class="text-xs text-slate-400">Tax Rate</p>
+            <p class="text-lg font-semibold text-slate-100">${(window.elementSdk ? window.elementSdk.config.sales_tax_rate : 0)}%</p>
+          </div>
+          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600">
+            <p class="text-xs text-slate-400">Tax Amount</p>
+            <p class="text-lg font-semibold text-amber-400">$${taxAmount.toFixed(2)}</p>
+          </div>
+        </div>
+        <div class="space-y-2 max-h-96 overflow-y-auto">
+          ${sales.map(s => `
+            <div class="bg-slate-700/30 rounded p-3 border border-slate-600 flex justify-between items-center">
+              <div>
+                <span class="font-medium text-slate-100">${s.name}</span>
+                <span class="text-xs text-slate-400 ml-2">${s.sold_quantity} units</span>
+              </div>
+              <span class="font-semibold text-blue-400">$${s.revenue.toFixed(2)}</span>
+            </div>`).join('')}
+        </div>`;
+    }
+
+    function showInventoryReport() {
+      document.querySelectorAll('[id$="-report"]').forEach(el => el.classList.add('hidden'));
+      document.getElementById('inventory-report').classList.remove('hidden');
+      const content = document.getElementById('inventory-report-content');
+      const products = getProducts();
+      if (products.length === 0) { content.innerHTML = '<p class="text-slate-400">No products</p>'; return; }
+      const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
+      content.innerHTML = `
+        <div class="bg-slate-700/50 rounded-lg p-4 mb-4 border border-emerald-500/20">
+          <p class="text-sm text-slate-400">Total Inventory Value</p>
+          <p class="text-3xl font-bold text-emerald-400">$${totalValue.toFixed(2)}</p>
+        </div>
+        <div class="space-y-2">
+          ${products.map(p => {
+            const threshold = p.low_stock_threshold || 5;
+            const isLow = p.quantity <= threshold;
+            return `
+              <div class="bg-slate-700/30 rounded p-4 border ${isLow ? 'border-red-500/30' : 'border-slate-600'} flex justify-between items-center">
+                <div>
+                  <span class="font-medium text-slate-100">${p.name}</span>
+                  <span class="text-xs text-slate-400 ml-2">Category: ${p.category || 'General'}</span>
+                  ${isLow ? '<span class="text-xs text-red-400 ml-2">⚠️ Low</span>' : ''}
+                </div>
+                <div class="text-right">
+                  <p class="text-sm font-semibold text-slate-100">${p.quantity} × $${p.price.toFixed(2)}</p>
+                  <p class="text-sm text-emerald-400">$${(p.quantity * p.price).toFixed(2)}</p>
+                </div>
+              </div>`;
+          }).join('')}
+        </div>`;
+    }
+
+    function showLowStockReport() {
+      document.querySelectorAll('[id$="-report"]').forEach(el => el.classList.add('hidden'));
+      document.getElementById('low-stock-report').classList.remove('hidden');
+      const content = document.getElementById('low-stock-report-content');
+      const lowStock = getLowStockProducts();
+      if (lowStock.length === 0) {
+        content.innerHTML = '<div class="bg-emerald-900/20 border border-emerald-500/30 rounded-lg p-6 text-center"><p class="text-emerald-400">✓ All items are well stocked!</p></div>';
+        return;
+      }
+      content.innerHTML = lowStock.map(p => {
+        const threshold = p.low_stock_threshold || 5;
+        const status = p.quantity === 0 ? 'Out of Stock' : 'Low Stock';
+        return `
+          <div class="bg-slate-800 rounded-lg p-4 border ${p.quantity === 0 ? 'border-red-500/30 critical-stock' : 'border-amber-500/30 low-stock'}">
+            <div class="flex justify-between items-start mb-2">
+              <div>
+                <h4 class="font-semibold text-slate-100">${p.name}</h4>
+                <p class="text-xs text-slate-400">Category: ${p.category || 'General'}</p>
+              </div>
+              <span class="px-3 py-1 rounded-full text-xs font-medium ${p.quantity === 0 ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400'}">${status}</span>
+            </div>
+            <div class="grid grid-cols-3 gap-2 text-center text-sm">
+              <div>
+                <p class="text-slate-400">Current</p>
+                <p class="font-bold text-slate-100">${p.quantity}</p>
+              </div>
+              <div>
+                <p class="text-slate-400">Alert Level</p>
+                <p class="font-bold text-slate-100">${threshold}</p>
+              </div>
+              <div>
+                <p class="text-slate-400">Needed</p>
+                <p class="font-bold text-amber-400">${Math.max(0, threshold - p.quantity)}</p>
+              </div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function showPrintableList() {
+      document.querySelectorAll('[id$="-report"]').forEach(el => el.classList.add('hidden'));
+      document.getElementById('printable-list').classList.remove('hidden');
+      const content = document.getElementById('printable-list-content');
+      const products = getProducts();
+      if (products.length === 0) { content.innerHTML = '<p class="text-gray-400">No products</p>'; return; }
+      content.innerHTML = `
+        <table class="w-full border-collapse text-sm">
+          <thead>
+            <tr class="border-b-2 border-gray-800">
+              <th class="text-left py-2 px-3">Product Name</th>
+              <th class="text-left py-2 px-3">Category</th>
+              <th class="text-center py-2 px-3">Qty</th>
+              <th class="text-right py-2 px-3">Price</th>
+              <th class="text-right py-2 px-3">Total Value</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${products.map(p => `
+              <tr class="border-b border-gray-300">
+                <td class="py-2 px-3">${p.name}</td>
+                <td class="py-2 px-3">${p.category || 'General'}</td>
+                <td class="text-center py-2 px-3">${p.quantity}</td>
+                <td class="text-right py-2 px-3">$${p.price.toFixed(2)}</td>
+                <td class="text-right py-2 px-3 font-semibold">$${(p.quantity * p.price).toFixed(2)}</td>
+              </tr>`).join('')}
+            <tr class="border-t-2 border-gray-800 font-bold">
+              <td colspan="4" class="text-right py-3 px-3">Total Inventory Value:</td>
+              <td class="text-right py-3 px-3">$${products.reduce((sum, p) => sum + (p.quantity * p.price), 0).toFixed(2)}</td>
+            </tr>
+          </tbody>
+        </table>`;
+    }
+
+    function printCurrentView() { window.print(); }
+
+    // Settings helpers
+    function loadSettingsForm() {
+      const storeName = window.elementSdk ? window.elementSdk.config.store_name : 'My Store';
+      const storePhone = window.elementSdk ? window.elementSdk.config.store_phone : '(555) 000-0000';
+      const taxRate = window.elementSdk ? window.elementSdk.config.sales_tax_rate : '8.5';
+      document.getElementById('settings-store-name').value = storeName;
+      document.getElementById('settings-store-phone').value = storePhone;
+      document.getElementById('settings-store-email').value = '';
+      document.getElementById('settings-store-address').value = '';
+      document.getElementById('settings-tax-rate').value = taxRate;
+      document.getElementById('settings-tax-name').value = 'Sales Tax';
+      updateTaxPreview();
+      updateStoreStatus();
+    }
+
+    function updateTaxPreview() {
+      const taxRate = parseFloat(document.getElementById('settings-tax-rate').value) || 0;
+      const subtotal = 100;
+      const taxAmount = subtotal * (taxRate / 100);
+      const total = subtotal + taxAmount;
+      document.getElementById('tax-preview-label').textContent = `Sales Tax (${taxRate.toFixed(2)}%):`;
+      document.getElementById('tax-preview-amount').textContent = `$${taxAmount.toFixed(2)}`;
+      document.getElementById('tax-preview-total').textContent = `$${total.toFixed(2)}`;
+    }
+
+    function updateStoreStatus() {
+      const products = getProducts();
+      const sales = getSales();
+      const lowStock = getLowStockProducts();
+      const totalValue = products.reduce((sum, p) => sum + (p.quantity * p.price), 0);
+      document.getElementById('status-products').textContent = products.length;
+      document.getElementById('status-inventory-value').textContent = `$${totalValue.toFixed(2)}`;
+      document.getElementById('status-total-sales').textContent = sales.length;
+      document.getElementById('status-low-stock').textContent = lowStock.length;
+    }
+
+    async function handleUpdateSettings(event) {
+      event.preventDefault();
+      const storeName = document.getElementById('settings-store-name').value.trim();
+      const storePhone = document.getElementById('settings-store-phone').value.trim();
+      if (!storeName) { showToast('Enter a store name', 'warning'); return; }
+      if (window.elementSdk) {
+        await window.elementSdk.setConfig({ store_name: storeName, store_phone: storePhone });
+        showToast('Store info updated!', 'success');
+      }
+    }
+
+    async function handleUpdateTax(event) {
+      event.preventDefault();
+      const taxRate = document.getElementById('settings-tax-rate').value.trim();
+      if (taxRate === '') { showToast('Enter a tax rate', 'warning'); return; }
+      if (window.elementSdk) {
+        await window.elementSdk.setConfig({ sales_tax_rate: taxRate });
+        showToast('Tax settings updated!', 'success');
+      }
+      updateTaxPreview();
+    }
+
+    document.getElementById('settings-tax-rate')?.addEventListener('input', updateTaxPreview);
+    document.addEventListener('click', function(e) {
+      if (e.target.closest('.tab-btn') && e.target.textContent.includes('⚙️')) {
+        setTimeout(() => loadSettingsForm(), 50);
+      }
+    });
+
+    // Start app
+    initApp();
+    setTimeout(() => updateCategorySelects(), 100);
+  </script>
+</body>
+</html>
