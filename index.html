@@ -1,4 +1,4 @@
-<!doctype html>
+  <!doctype html>
 <html lang="en" class="h-full">
 <head>
   <meta charset="UTF-8">
@@ -333,6 +333,11 @@
             <div class="sm:col-span-2">
               <p id="sale-info" class="text-sm text-slate-400 bg-slate-700/50 p-3 rounded-lg"></p>
             </div>
+            <!-- Tax Exempt checkbox -->
+            <div class="sm:col-span-2 flex items-center gap-3 bg-slate-700/30 p-4 rounded-lg border border-slate-600">
+              <input type="checkbox" id="sale-tax-exempt" class="w-4 h-4 cursor-pointer">
+              <label for="sale-tax-exempt" class="text-sm text-slate-300 font-medium cursor-pointer flex-1">Tax Exempt (no tax on this sale)</label>
+            </div>
             <div class="sm:col-span-2 flex gap-3 justify-end mt-4">
               <button type="button" onclick="hideRecordSaleForm()" class="px-6 py-3 rounded-lg text-slate-400 hover:text-slate-200 font-medium transition-colors">Cancel</button>
               <button type="submit" id="record-sale-btn" class="btn-large bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-medium transition-colors">Record Sale</button>
@@ -637,6 +642,14 @@
     function calculateRevenueWithTax(revenue) { const taxRate = window.elementSdk ? (parseFloat(window.elementSdk.config.sales_tax_rate) || 0) / 100 : 0; return revenue * (1 + taxRate); }
     function calculateTaxAmount(revenue) { const taxRate = window.elementSdk ? (parseFloat(window.elementSdk.config.sales_tax_rate) || 0) / 100 : 0; return revenue * taxRate; }
 
+    // === Tax-exempt aware helpers ===
+    const getTaxRate = () => window.elementSdk ? (parseFloat(window.elementSdk.config.sales_tax_rate) || 0) / 100 : 0;
+    const getTaxableRevenue = (sales) => sales.filter(s => !s.tax_exempt).reduce((sum, s) => sum + (s.revenue || 0), 0);
+    const getRevenueWithAllTax = (sales) => {
+      const r = getTaxRate();
+      return sales.reduce((sum, s) => sum + (s.revenue || 0) * (s.tax_exempt ? 1 : (1 + r)), 0);
+    };
+
     // JSON Backup
     function exportJSON() {
       const payload = {
@@ -744,7 +757,13 @@
       updateProductSelect();
       document.getElementById('record-sale-form').classList.remove('hidden');
     }
-    function hideRecordSaleForm() { document.getElementById('record-sale-form').classList.add('hidden'); document.getElementById('sale-product').value = ''; document.getElementById('sale-quantity').value = ''; document.getElementById('sale-info').textContent = ''; }
+    function hideRecordSaleForm() {
+      document.getElementById('record-sale-form').classList.add('hidden');
+      document.getElementById('sale-product').value = '';
+      document.getElementById('sale-quantity').value = '';
+      document.getElementById('sale-info').textContent = '';
+      const taxBox = document.getElementById('sale-tax-exempt'); if (taxBox) taxBox.checked = false;
+    }
 
     function updateProductSelect() {
       const select = document.getElementById('sale-product');
@@ -813,6 +832,7 @@
       const productId = document.getElementById('sale-product').value;
       const quantity = parseInt(document.getElementById('sale-quantity').value);
       const product = getProducts().find(p => p.__backendId === productId);
+      const taxExempt = document.getElementById('sale-tax-exempt')?.checked || false;
       if (!product || quantity > product.quantity) { showToast('Invalid quantity', 'error'); return; }
       const btn = document.getElementById('record-sale-btn');
       btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Recording...';
@@ -824,13 +844,14 @@
         sold_quantity: quantity,
         price: product.price,
         revenue: quantity * product.price,
+        tax_exempt: taxExempt,
         sale_date: new Date().toISOString()
       };
       const saleResult = await window.dataSdk.create(sale);
       if (saleResult.isOk) {
         const updatedProduct = { ...product, quantity: product.quantity - quantity };
         await window.dataSdk.update(updatedProduct);
-        btn.disabled = false; btn.innerHTML = 'Record Sale'; hideRecordSaleForm(); showToast('Sale recorded!', 'success');
+        btn.disabled = false; btn.innerHTML = 'Record Sale'; hideRecordSaleForm(); showToast(`Sale recorded!${taxExempt ? ' (Tax Exempt)' : ''}`, 'success');
       } else {
         btn.disabled = false; btn.innerHTML = 'Record Sale'; showToast('Failed to record sale', 'error');
       }
@@ -873,8 +894,7 @@
       const totalProducts = products.length;
       const totalStock = products.reduce((sum, p) => sum + (p.quantity || 0), 0);
       const todaySalesCount = today.reduce((sum, s) => sum + (s.sold_quantity || 0), 0);
-      const todayRevenue = today.reduce((sum, s) => sum + (s.revenue || 0), 0);
-      const todayRevenueWithTax = calculateRevenueWithTax(todayRevenue);
+      const todayRevenueWithTax = getRevenueWithAllTax(today);
       document.getElementById('stat-products').textContent = totalProducts;
       document.getElementById('stat-stock').textContent = totalStock;
       document.getElementById('stat-today').textContent = todaySalesCount;
@@ -899,14 +919,18 @@
       if (today.length === 0) {
         todayList.innerHTML = '<p class="text-sm text-slate-400">No sales yet</p>';
       } else {
-        const totalRevenue = today.reduce((sum, s) => sum + s.revenue, 0);
-        const taxAmount = calculateTaxAmount(totalRevenue);
-        const revenueWithTax = calculateRevenueWithTax(totalRevenue);
+        const subtotal = today.reduce((sum, s) => sum + (s.revenue || 0), 0);
+        const taxable = getTaxableRevenue(today);
+        const tax = taxable * getTaxRate();
+        const total = getRevenueWithAllTax(today);
+        const exemptCount = today.filter(s => s.tax_exempt).length;
+        const exemptNote = exemptCount > 0 ? '<p class="text-xs text-blue-400 ml-0">└ ' + exemptCount + ' tax-exempt</p>' : '';
         todayList.innerHTML = `
           <p class="text-sm text-slate-300 mb-2"><span class="font-semibold text-amber-400">${today.length} sales</span> today</p>
-          <p class="text-sm text-slate-400">Subtotal: <span class="text-slate-100 font-semibold">$${totalRevenue.toFixed(2)}</span></p>
-          <p class="text-sm text-slate-400">Tax: <span class="text-slate-100 font-semibold">$${taxAmount.toFixed(2)}</span></p>
-          <p class="text-sm text-amber-400 font-semibold border-t border-slate-600 mt-2 pt-2">Total: $${revenueWithTax.toFixed(2)}</p>`;
+          <p class="text-sm text-slate-400">Subtotal: <span class="text-slate-100 font-semibold">$${subtotal.toFixed(2)}</span></p>
+          ${exemptNote}
+          <p class="text-sm text-slate-400">Tax on $${taxable.toFixed(2)}: <span class="text-slate-100 font-semibold">$${tax.toFixed(2)}</span></p>
+          <p class="text-sm text-amber-400 font-semibold border-t border-slate-600 mt-2 pt-2">Total: $${total.toFixed(2)}</p>`;
       }
 
       const invContainer = document.getElementById('dashboard-inventory');
@@ -1034,52 +1058,34 @@
 
     function updateMonthlyReport() {
       const monthStr = document.getElementById('report-month').value;
-      const sales = getSales().filter(s => s.sale_date.startsWith(monthStr));
+      const sales = getSales().filter(s => (s.sale_date || '').startsWith(monthStr));
       const content = document.getElementById('monthly-report-content');
       if (sales.length === 0) { content.innerHTML = '<p class="text-slate-400">No sales in this month</p>'; return; }
-      const totalRevenue = sales.reduce((sum, s) => sum + s.revenue, 0);
-      const totalQty = sales.reduce((sum, s) => sum + s.sold_quantity, 0);
-      const taxAmount = calculateTaxAmount(totalRevenue);
-      const revenueWithTax = calculateRevenueWithTax(totalRevenue);
+      const subtotal = sales.reduce((sum, s) => sum + (s.revenue || 0), 0);
+      const qty = sales.reduce((sum, s) => sum + (s.sold_quantity || 0), 0);
+      const taxable = getTaxableRevenue(sales);
+      const tax = taxable * getTaxRate();
+      const total = getRevenueWithAllTax(sales);
       content.innerHTML = `
         <div class="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
-          <div class="bg-slate-700/50 rounded-lg p-4">
-            <p class="text-sm text-slate-400">Total Sales</p>
-            <p class="text-2xl font-bold text-blue-400">${sales.length}</p>
-          </div>
-          <div class="bg-slate-700/50 rounded-lg p-4">
-            <p class="text-sm text-slate-400">Units Sold</p>
-            <p class="text-2xl font-bold text-slate-100">${totalQty}</p>
-          </div>
-          <div class="bg-slate-700/50 rounded-lg p-4">
-            <p class="text-sm text-slate-400">Subtotal</p>
-            <p class="text-2xl font-bold text-slate-100">$${totalRevenue.toFixed(2)}</p>
-          </div>
-          <div class="bg-slate-700/50 rounded-lg p-4 border border-blue-500/30">
-            <p class="text-sm text-slate-400">Total (with tax)</p>
-            <p class="text-2xl font-bold text-blue-400">$${revenueWithTax.toFixed(2)}</p>
-          </div>
+          <div class="bg-slate-700/50 rounded-lg p-4"><p class="text-sm text-slate-400">Total Sales</p><p class="text-2xl font-bold text-blue-400">${sales.length}</p></div>
+          <div class="bg-slate-700/50 rounded-lg p-4"><p class="text-sm text-slate-400">Units Sold</p><p class="text-2xl font-bold text-slate-100">${qty}</p></div>
+          <div class="bg-slate-700/50 rounded-lg p-4"><p class="text-sm text-slate-400">Subtotal</p><p class="text-2xl font-bold text-slate-100">$${subtotal.toFixed(2)}</p></div>
+          <div class="bg-slate-700/50 rounded-lg p-4 border border-blue-500/30"><p class="text-sm text-slate-400">Total (with tax)</p><p class="text-2xl font-bold text-blue-400">$${total.toFixed(2)}</p></div>
         </div>
         <div class="grid grid-cols-2 gap-4 mb-6 sm:w-1/3">
-          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600">
-            <p class="text-xs text-slate-400">Tax Rate</p>
-            <p class="text-lg font-semibold text-slate-100">${(window.elementSdk ? window.elementSdk.config.sales_tax_rate : 0)}%</p>
-          </div>
-          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600">
-            <p class="text-xs text-slate-400">Tax Amount</p>
-            <p class="text-lg font-semibold text-amber-400">$${taxAmount.toFixed(2)}</p>
-          </div>
+          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600"><p class="text-xs text-slate-400">Tax Rate</p><p class="text-lg font-semibold text-slate-100">${(window.elementSdk?window.elementSdk.config.sales_tax_rate:0)}%</p></div>
+          <div class="bg-slate-700/30 rounded-lg p-3 border border-slate-600"><p class="text-xs text-slate-400">Tax Amount</p><p class="text-lg font-semibold text-amber-400">$${tax.toFixed(2)}</p></div>
         </div>
         <div class="space-y-2 max-h-96 overflow-y-auto">
           ${sales.map(s => `
             <div class="bg-slate-700/30 rounded p-3 border border-slate-600 flex justify-between items-center">
-              <div>
-                <span class="font-medium text-slate-100">${s.name}</span>
-                <span class="text-xs text-slate-400 ml-2">${s.sold_quantity} units</span>
-              </div>
-              <span class="font-semibold text-blue-400">$${s.revenue.toFixed(2)}</span>
-            </div>`).join('')}
-        </div>`;
+              <div><span class="font-medium text-slate-100">${s.name}</span><span class="text-xs text-slate-400 ml-2">${s.sold_quantity} units</span>${s.tax_exempt ? '<span class="text-xs text-blue-400 ml-2">🔵 Tax Exempt</span>' : ''}</div>
+              <span class="font-semibold text-blue-400">$${(s.revenue || 0).toFixed(2)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
     }
 
     function showInventoryReport() {
@@ -1111,7 +1117,8 @@
                 </div>
               </div>`;
           }).join('')}
-        </div>`;
+        </div>
+      `;
     }
 
     function showLowStockReport() {
@@ -1187,7 +1194,146 @@
         </table>`;
     }
 
-    function printCurrentView() { window.print(); }
+    // Printable helper + Print routing
+    function openPrintable(title, htmlContent) {
+      const w = window.open('', '_blank');
+      if (!w) { showToast('Popup blocked. Please allow popups for this site.', 'error'); return; }
+      const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>${title}</title>
+<style>
+  body{font-family:Arial,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#111;background:#fff;margin:24px;line-height:1.5}
+  h1,h2{margin:0 0 8px 0} h1{font-size:20px} h2{font-size:16px;color:#444}
+  table{width:100%;border-collapse:collapse;margin:16px 0} th,td{border:1px solid #bbb;padding:8px;text-align:left;font-size:13px}
+  th{background:#eee} tr:nth-child(even){background:#f8f8f8}
+  .muted{color:#666;font-size:12px}
+  .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+</style></head>
+<body>
+  ${htmlContent}
+  <script>setTimeout(()=>window.print(), 250);<\/script>
+</body></html>`;
+      w.document.open(); w.document.write(html); w.document.close();
+    }
+
+    function printCurrentView() {
+      const monthly = document.getElementById('monthly-report');
+      const inventory = document.getElementById('inventory-report');
+      const low = document.getElementById('low-stock-report');
+      const printable = document.getElementById('printable-list');
+
+      if (monthly && !monthly.classList.contains('hidden')) {
+        const mEl = document.getElementById('report-month');
+        const m = mEl ? mEl.value : '';
+        const sales = getSales().filter(s => (s.sale_date || '').startsWith(m));
+        const rows = sales.map(s => `
+          <tr>
+            <td>${new Date(s.sale_date).toLocaleDateString()}</td>
+            <td>${s.name}</td>
+            <td>${s.category}</td>
+            <td style="text-align:center">${s.sold_quantity}</td>
+            <td style="text-align:right">$${(s.price||0).toFixed(2)}</td>
+            <td style="text-align:right">$${(s.revenue||0).toFixed(2)}</td>
+            <td>${s.tax_exempt ? 'Yes' : 'No'}</td>
+          </tr>
+        `).join('');
+        const html = `
+          <div class="header">
+            <h1>Monthly Sales — ${m || '(no month set)'}</h1>
+            <div class="muted">Exported: ${new Date().toLocaleString()}</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Date</th><th>Product</th><th>Category</th><th>Qty</th><th>Unit Price</th><th>Revenue</th><th>Tax Exempt</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="7">No sales</td></tr>'}</tbody>
+          </table>`;
+        openPrintable('Monthly Sales', html);
+        return;
+      }
+
+      if (inventory && !inventory.classList.contains('hidden')) {
+        const products = getProducts();
+        const rows = products.map(p => `
+          <tr>
+            <td>${p.name}</td>
+            <td>${p.category || 'General'}</td>
+            <td style="text-align:center">${p.quantity}</td>
+            <td style="text-align:right">$${(p.price||0).toFixed(2)}</td>
+            <td style="text-align:right">$${((p.quantity||0)*(p.price||0)).toFixed(2)}</td>
+          </tr>
+        `).join('');
+        const html = `
+          <div class="header">
+            <h1>Inventory List</h1>
+            <div class="muted">Exported: ${new Date().toLocaleString()}</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Product</th><th>Category</th><th>Qty</th><th>Unit Price</th><th>Total Value</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="5">No products</td></tr>'}</tbody>
+          </table>`;
+        openPrintable('Inventory List', html);
+        return;
+      }
+
+      if (low && !low.classList.contains('hidden')) {
+        const lowItems = getLowStockProducts();
+        const rows = lowItems.map(p => `
+          <tr>
+            <td>${p.name}</td>
+            <td>${p.category || 'General'}</td>
+            <td style="text-align:center">${p.quantity}</td>
+            <td style="text-align:center">${p.low_stock_threshold || 5}</td>
+            <td style="text-align:center">${Math.max(0, (p.low_stock_threshold || 5) - (p.quantity||0))}</td>
+          </tr>
+        `).join('');
+        const html = `
+          <div class="header">
+            <h1>Low Stock Items</h1>
+            <div class="muted">Exported: ${new Date().toLocaleString()}</div>
+          </div>
+          <table>
+            <thead>
+              <tr><th>Product</th><th>Category</th><th>Current</th><th>Alert Level</th><th>Needed</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="5">No low stock items</td></tr>'}</tbody>
+          </table>`;
+        openPrintable('Low Stock Items', html);
+        return;
+      }
+
+      if (printable && !printable.classList.contains('hidden')) {
+        const products = getProducts();
+        const rows = products.map(p => `
+          <tr>
+            <td>${p.name}</td>
+            <td>${p.category || 'General'}</td>
+            <td style="text-align:center">${p.quantity}</td>
+            <td style="text-align:right">$${(p.price||0).toFixed(2)}</td>
+            <td style="text-align:right">$${((p.quantity||0)*(p.price||0)).toFixed(2)}</td>
+          </tr>
+        `).join('');
+        const total = products.reduce((s,p)=> s + ((p.quantity||0)*(p.price||0)), 0);
+        const html = `
+          <div class="header">
+            <h1>Store Inventory List</h1>
+            <div class="muted">Exported: ${new Date().toLocaleString()}</div>
+          </div>
+          <table>
+            <thead><tr><th>Product</th><th>Category</th><th>Qty</th><th>Unit Price</th><th>Total Value</th></tr></thead>
+            <tbody>
+              ${rows || '<tr><td colspan="5">No products</td></tr>'}
+              <tr><td colspan="4" style="text-align:right"><strong>Total Inventory Value:</strong></td><td style="text-align:right"><strong>$${total.toFixed(2)}</strong></td></tr>
+            </tbody>
+          </table>`;
+        openPrintable('Store Inventory List', html);
+        return;
+      }
+
+      // Fallback
+      window.print();
+    }
 
     // Settings helpers
     function loadSettingsForm() {
